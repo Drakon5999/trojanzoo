@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-
-from ...abstract import TrainingFiltering
-from trojanvision.environ import env
-
 import torch
 from sklearn.decomposition import FastICA, PCA
 from sklearn.cluster import KMeans, MiniBatchKMeans
@@ -10,13 +5,12 @@ from sklearn.metrics import silhouette_score
 from tqdm import tqdm
 
 from typing import TYPE_CHECKING
-import argparse
 from collections.abc import Callable
 if TYPE_CHECKING:
     import torch.utils.data
 
 
-class ActivationClustering(TrainingFiltering):
+class ActivationClustering():
     r"""Activation Clustering proposed by Bryant Chen
     from IBM Research in SafeAI@AAAI 2019.
 
@@ -74,56 +68,55 @@ class ActivationClustering(TrainingFiltering):
 
     name: str = 'activation_clustering'
 
-    @classmethod
-    def add_argument(cls, group: argparse._ArgumentGroup):
-        super().add_argument(group)
-        group.add_argument('--nb_clusters', type=int,
-                           help='number of clusters (default: 2)')
-        group.add_argument('--nb_dims', type=int,
-                           help='the reduced dimension of feature maps (default: 10)')
-        group.add_argument('--reduce_method',
-                           help='the method to reduce dimension of feature maps '
-                           '(default: "FastICA")')
-        group.add_argument('--cluster_analysis', choices=['size', 'relative_size', 'distance', 'silhouette_score'],
-                           help='the method chosen to detect poisoned cluster classes '
-                           '(default: "silhouette_score")')
-        return group
-
-    def __init__(self, nb_clusters: int = 2, nb_dims: int = 10,
-                 reduce_method: str = 'FastICA',
-                 cluster_analysis: str = 'silhouette_score',
-                 **kwargs):
-        super().__init__(**kwargs)
-        self.param_list['activation_clustering'] = ['nb_clusters', 'nb_dims', 'reduce_method', 'cluster_analysis']
-
+    def __init__(
+        self,
+        classifier: Callable[[torch.Tensor], int],
+        feature_extractor: Callable[[torch.Tensor], torch.Tensor],
+        dataset: torch.utils.data.DataLoader,
+        nb_clusters: int = 2,
+        nb_dims: int = 10,
+        reduce_method: str = 'FastICA',
+        cluster_analysis: str = 'silhouette_score',
+        **kwargs):
+        """
+        @param nb_clusters: number of clusters (default: 2)
+        @param nb_dims: the reduced dimension of feature maps (default: 10)
+        @param reduce_method: the method to reduce dimension of feature maps
+        @param cluster_analysis: the method chosen to detect poisoned cluster classes
+                ['size', 'relative_size', 'distance', 'silhouette_score']
+        """
+        # super().__init__(**kwargs)
         self.nb_clusters = nb_clusters
         self.nb_dims = nb_dims
         self.reduce_method = reduce_method
         self.cluster_analysis = cluster_analysis
+        self.dataset = dataset
+        self.feature_extractor = feature_extractor
+        self.classifier = classifier
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         match self.reduce_method:
             case 'FastICA':
-                self.projector = FastICA(n_components=self.nb_dims)
+                self.projector = FastICA(n_components=self.nb_dims, whiten='unit-variance', max_iter=1000)
             case 'PCA':
                 self.projector = PCA(n_components=self.nb_dims)
             case _:
                 raise ValueError(self.reduce_method + ' dimensionality reduction method not supported.')
-        clusterer_class = MiniBatchKMeans if self.defense_input_num else KMeans
-        self.clusterer = clusterer_class(n_clusters=self.nb_clusters)
+        clusterer_class = KMeans
+        self.clusterer = clusterer_class(n_clusters=self.nb_clusters, n_init="auto")
 
     def get_pred_labels(self) -> torch.Tensor:
         all_fm = []
         all_pred_label = []
-        mix_dataset = torch.utils.data.ConcatDataset([self.clean_set, self.poison_set])
-        loader = self.dataset.get_dataloader('train', dataset=mix_dataset)
-        if env['tqdm']:
-            loader = tqdm(loader, leave=False)
-        for data in loader:
-            _input, _label = self.model.get_data(data)
-            fm = self.model._model.get_final_fm(_input)
-            pred_label = self.model.get_class(_input)
+        loader = self.dataset
+        loader = tqdm(loader, leave=False)
+        for _input, _label in loader:
+            fm = self.feature_extractor(_input.to(self.device))
+            # fm = self.model._model.get_final_fm(_input)
+            pred_label = self.classifier(fm)
             all_fm.append(fm.detach().cpu())
             all_pred_label.append(pred_label.detach().cpu())
+
         all_fm = torch.cat(all_fm)
         all_pred_label = torch.cat(all_pred_label)
 
@@ -133,7 +126,8 @@ class ActivationClustering(TrainingFiltering):
         idx_list: list[torch.Tensor] = []
         reduced_fm_centers_list: list[torch.Tensor] = []
         kwargs_list: list[dict[str, torch.Tensor]] = []
-        for _class in range(self.dataset.num_classes):
+        for _class_name in self.dataset.dataset.classes:
+            _class = self.dataset.dataset.class_to_idx[_class_name]
             idx = all_pred_label == _class
             fm = all_fm[idx]
             reduced_fm = torch.as_tensor(self.projector.fit_transform(fm.numpy()))
@@ -145,7 +139,8 @@ class ActivationClustering(TrainingFiltering):
         if self.cluster_analysis == 'distance':
             reduced_fm_centers = torch.stack(reduced_fm_centers_list)
 
-        for _class in range(self.dataset.num_classes):
+        for _class_name in self.dataset.dataset.classes:
+            _class = self.dataset.dataset.class_to_idx[_class_name]
             kwargs = kwargs_list[_class]
             idx = torch.arange(len(all_pred_label))[idx_list[_class]]
             if self.cluster_analysis == 'distance':

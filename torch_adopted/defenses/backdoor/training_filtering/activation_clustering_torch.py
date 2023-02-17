@@ -109,8 +109,9 @@ class ActivationClustering():
         all_fm = []
         all_pred_label = []
         loader = self.dataset
-        loader = tqdm(loader, leave=False)
-        for _input, _label in loader:
+        labels = set()
+        for _input, _label in tqdm(loader, leave=False):
+            labels.update([l.item() for l in _label])
             fm = self.feature_extractor(_input.to(self.device))
             # fm = self.model._model.get_final_fm(_input)
             pred_label = self.classifier(fm)
@@ -126,8 +127,7 @@ class ActivationClustering():
         idx_list: list[torch.Tensor] = []
         reduced_fm_centers_list: list[torch.Tensor] = []
         kwargs_list: list[dict[str, torch.Tensor]] = []
-        for _class_name in self.dataset.dataset.classes:
-            _class = self.dataset.dataset.class_to_idx[_class_name]
+        for _class in tqdm(labels, leave=False):
             idx = all_pred_label == _class
             fm = all_fm[idx]
             reduced_fm = torch.as_tensor(self.projector.fit_transform(fm.numpy()))
@@ -139,8 +139,7 @@ class ActivationClustering():
         if self.cluster_analysis == 'distance':
             reduced_fm_centers = torch.stack(reduced_fm_centers_list)
 
-        for _class_name in self.dataset.dataset.classes:
-            _class = self.dataset.dataset.class_to_idx[_class_name]
+        for _class in tqdm(labels, leave=False):
             kwargs = kwargs_list[_class]
             idx = torch.arange(len(all_pred_label))[idx_list[_class]]
             if self.cluster_analysis == 'distance':

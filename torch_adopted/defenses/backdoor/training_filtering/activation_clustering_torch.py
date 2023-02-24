@@ -113,9 +113,13 @@ class ActivationClustering():
         for _input, _label in tqdm(loader, leave=False):
             labels.update([l.item() for l in _label])
             fm = self.feature_extractor(_input.to(self.device))
-            # fm = self.model._model.get_final_fm(_input)
+
             pred_label = self.classifier(fm)
-            all_fm.append(fm.detach().cpu())
+            assert len(pred_label.shape) == 1, 'classifier should return 1d tensor'
+
+
+            # we use flatten because feature extractor can return non 1d feature maps
+            all_fm.append(torch.flatten(fm.detach().cpu(), 1, -1))
             all_pred_label.append(pred_label.detach().cpu())
 
         all_fm = torch.cat(all_fm)

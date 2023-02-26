@@ -81,6 +81,7 @@ class NeuralCleanse():
         self.img_shape = img_shape
         self.pattern = torch.rand(img_shape, device=self.device) * 255.0
         self.mask = torch.rand(img_shape, device=self.device)
+        self.cost = self.init_cost
 
     def patch_images(self, images, mask=None, pattern=None):
         """
@@ -177,7 +178,7 @@ class NeuralCleanse():
             torch.Tensor: Scalar loss tensor.
         """
         trigger_input = self.patch_images(_input)
-        trigger_label = target * torch.ones_like(_label)
+        trigger_label = (target * torch.ones_like(_label)).cuda()
         if trigger_output is None:
             trigger_output = self.model(trigger_input)
 
@@ -244,13 +245,12 @@ class NeuralCleanse():
         for _ in iterator:
             batch_logger.reset()
             for _input, _label in tqdm(self.dataset, leave=False):
-                print(_label)
                 _input = _input.to(self.device)
                 self.pattern = tanh_func(atanh_pattern)    # (c+1, h, w)
                 self.mask = tanh_func(atanh_mask)    # (c+1, h, w)
-                trigger_input = self.patch_images(_input)
-                trigger_label = label * torch.ones_like(_label)
-                trigger_output = self.model(trigger_input)
+                trigger_input = self.patch_images(_input).cuda()
+                trigger_label = (label * torch.ones_like(_label)).cuda()
+                trigger_output = self.model(trigger_input.cuda())
 
                 batch_acc = trigger_label.eq(trigger_output.argmax(1)).float().mean()
                 batch_entropy = self.loss(_input, _label,

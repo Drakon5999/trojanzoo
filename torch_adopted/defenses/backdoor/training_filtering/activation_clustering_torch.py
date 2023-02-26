@@ -4,7 +4,7 @@ from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.metrics import silhouette_score
 from tqdm import tqdm
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence, Iterator
 from collections.abc import Callable
 if TYPE_CHECKING:
     import torch.utils.data
@@ -72,7 +72,7 @@ class ActivationClustering():
         self,
         classifier: Callable[[torch.Tensor], int],
         feature_extractor: Callable[[torch.Tensor], torch.Tensor],
-        dataset: torch.utils.data.DataLoader,
+        dataloader: torch.utils.data.DataLoader,
         nb_clusters: int = 2,
         nb_dims: int = 10,
         reduce_method: str = 'FastICA',
@@ -90,7 +90,7 @@ class ActivationClustering():
         self.nb_dims = nb_dims
         self.reduce_method = reduce_method
         self.cluster_analysis = cluster_analysis
-        self.dataset = dataset
+        self.dataloader = dataloader
         self.feature_extractor = feature_extractor
         self.classifier = classifier
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -108,7 +108,7 @@ class ActivationClustering():
     def get_pred_labels(self) -> torch.Tensor:
         all_fm = []
         all_pred_label = []
-        loader = self.dataset
+        loader = self.dataloader
         labels = set()
         for _input, _label in tqdm(loader, leave=False):
             labels.update([l.item() for l in _label])
@@ -148,7 +148,7 @@ class ActivationClustering():
             idx = torch.arange(len(all_pred_label))[idx_list[_class]]
             if self.cluster_analysis == 'distance':
                 kwargs['reduced_fm_centers'] = reduced_fm_centers
-            poison_cluster_classes = analyze_func(_class=_class, **kwargs)
+            poison_cluster_classes = analyze_func(_class=_class, idx=idx, **kwargs)
             for poison_cluster_class in poison_cluster_classes:
                 result[idx[kwargs['cluster_class'] == poison_cluster_class]] = True
         return result
@@ -183,7 +183,7 @@ class ActivationClustering():
 
     def analyze_by_silhouette_score(self, cluster_class: torch.Tensor,
                                     reduced_fm: torch.Tensor,
-                                    silhouette_threshold: float = 0.1,
+                                    silhouette_threshold: float = 0.11,
                                     **kwargs) -> list[int]:
         """Return :meth:`analyze_by_relative_size()`
         if :any:`sklearn.metrics.silhouette_score` is high,
@@ -232,3 +232,19 @@ class ActivationClustering():
         differences = cluster_centers.unsqueeze(1) - reduced_fm_centers.unsqueeze(0)
         distances: torch.Tensor = differences.norm(p=2, dim=2)  # (self.nb_clusters, C)
         return torch.arange(self.nb_clusters)[distances.argmin(dim=1) != _class].tolist()
+
+    def get_filtered_data(self, idx):
+        """Return dataloader that returns only data with given idx in given order"""
+        j = 0
+        for i, data in enumerate(self.dataloader):
+            assert idx[j] >= i
+            if idx[j] == i:
+                yield data
+                j += 1
+
+    def analyze_by_model_train(self, cluster_class: torch.Tensor,
+                               idx: torch.Tensor,
+                            reduced_fm: torch.Tensor,
+                            reduced_fm_centers: torch.Tensor,
+                            _class: int, **kwargs):
+        """Train model on one cluster and check on other cluster"""

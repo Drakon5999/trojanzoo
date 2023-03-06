@@ -64,7 +64,8 @@ class NeuralCleanse():
                  cost=1e-3, nc_cost_multiplier: float = 1.5, nc_patience: float = 10.0,
                  nc_asr_threshold: float = 0.99,
                  nc_early_stop_threshold: float = 0.99, device='cuda', **kwargs):
-        self.model = model
+        self.model = model.cuda()
+        self.model.eval()
         self.classes = classes
         self.dataset = dataset
         self.init_cost = cost
@@ -83,12 +84,12 @@ class NeuralCleanse():
         self.mask = torch.rand(img_shape, device=self.device)
         self.cost = self.init_cost
 
-    def patch_images(self, images, mask=None, pattern=None):
+    def patch_images(self, images, mask, pattern):
         """
         Add patch to images
         """
-        mask = (mask or self.mask).unsqueeze(0)
-        pattern = (pattern or self.pattern).unsqueeze(0)
+        mask = mask.unsqueeze(0)
+        pattern = pattern.unsqueeze(0)
         return mask * (self.alpha * pattern + (1 - self.alpha) * images) + (1 - mask) * images
 
     def detect(self):
@@ -145,7 +146,7 @@ class NeuralCleanse():
         """
         Calculate accuracy on poisoned images
         """
-        self.model.eval()
+        #self.model.eval()
         correct = 0
         total = 0
         for images, labels in self.dataset:
@@ -157,33 +158,6 @@ class NeuralCleanse():
             total += labels.size(0)
             correct += (predicted == target_label).sum().item()
         return correct / total
-
-
-    def loss(self, _input: torch.Tensor, _label: torch.Tensor, target: int,
-             trigger_output: None | torch.Tensor = None,
-             **kwargs) -> torch.Tensor:
-        r"""Loss function to optimize recovered trigger.
-
-        Args:
-            _input (torch.Tensor): Clean input tensor
-                with shape ``(N, C, H, W)``.
-            _label (torch.Tensor): Clean label tensor
-                with shape ``(N)``.
-            target (int): Target class.
-            trigger_output (torch.Tensor):
-                Output tensor of input tensor with trigger.
-                Defaults to ``None``.
-
-        Returns:
-            torch.Tensor: Scalar loss tensor.
-        """
-        trigger_input = self.patch_images(_input)
-        trigger_label = (target * torch.ones_like(_label)).cuda()
-        if trigger_output is None:
-            trigger_output = self.model(trigger_input)
-
-        # return model cross entropy loss
-        return torch.nn.functional.cross_entropy(trigger_output, trigger_label)
 
     def optimize_mark(self, label: int,
                       logger_header: str = '',
@@ -218,17 +192,14 @@ class NeuralCleanse():
         self.early_stop_counter = 0
         self.early_stop_norm_best = float('inf')
 
-        atanh_pattern_root = torch.randn_like(self.pattern, requires_grad=True, device=self.device)
-        atanh_pattern = atanh_pattern_root*255.
-        atanh_mask = torch.rand_like(self.mask, requires_grad=True, device=self.device)
+        atanh_pattern_root = torch.randn(self.pattern.size(), requires_grad=True, device=self.device)
+        atanh_mask = torch.randn(self.mask.size(), requires_grad=True, device=self.device)
         optimizer = optim.Adam([atanh_pattern_root, atanh_mask], lr=self.defense_remask_lr, betas=(0.5, 0.9))
         lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer,
                                                             T_max=self.defense_remask_epoch)
-        optimizer.zero_grad()
 
         # best optimization results
         norm_best: float = float('inf')
-        mark_best: torch.Tensor = None
         loss_best: float = None
 
         logger = MetricLogger(indent=4)
@@ -242,29 +213,34 @@ class NeuralCleanse():
         iterator = range(self.defense_remask_epoch)
         if verbose:
             iterator = logger.log_every(iterator, header=logger_header)
+        loss = torch.nn.CrossEntropyLoss()
+        self.model.eval()
         for _ in iterator:
             batch_logger.reset()
             for _input, _label in tqdm(self.dataset, leave=False):
-                _input = _input.to(self.device)
-                self.pattern = tanh_func(atanh_pattern)    # (c+1, h, w)
-                self.mask = tanh_func(atanh_mask)    # (c+1, h, w)
-                trigger_input = self.patch_images(_input).cuda()
+                atanh_pattern = atanh_pattern_root*255.
+                optimizer.zero_grad()
+                _input = _input.detach().to(self.device)
+                pattern = tanh_func(atanh_pattern)    # (c+1, h, w)
+                mask = tanh_func(atanh_mask)    # (c+1, h, w)
+                trigger_input = self.patch_images(_input, mask, pattern).cuda()
                 trigger_label = (label * torch.ones_like(_label)).cuda()
-                trigger_output = self.model(trigger_input.cuda())
+                trigger_output = self.model(trigger_input)
 
                 batch_acc = trigger_label.eq(trigger_output.argmax(1)).float().mean()
-                batch_entropy = self.loss(_input, _label,
-                                          target=label,
-                                          trigger_output=trigger_output,
-                                          **kwargs)
-                batch_norm: torch.Tensor = (self.mask * self.pattern)[-1].norm(p=1)
+
+                batch_entropy = torch.nn.functional.cross_entropy(trigger_output, trigger_label)
+                # batch_entropy = loss(trigger_output, trigger_label)
+                batch_norm: torch.Tensor = (mask * pattern)[-1].norm(p=1)
                 batch_loss = batch_entropy + self.cost * batch_norm
 
+                optimizer.zero_grad()
                 batch_loss.backward()
                 optimizer.step()
-                optimizer.zero_grad()
 
                 batch_size = _label.size(0)
+                self.pattern = pattern.detach().clone()
+                self.mask = mask.detach().clone()
                 batch_logger.update(n=batch_size,
                                     loss=batch_loss.item(),
                                     acc=batch_acc.item(),
@@ -291,11 +267,9 @@ class NeuralCleanse():
                 print('early stop')
                 break
 
-        atanh_mask.requires_grad_(False)
-        atanh_pattern.requires_grad_(False)
         self.mask = mask_best
         self.pattern = pattern_best
-        return mark_best, pattern_best, loss_best
+        return mask_best, pattern_best, loss_best
 
     def check_early_stop(self, acc: float, norm: float, **kwargs) -> bool:
         # update cost

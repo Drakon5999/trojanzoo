@@ -1,6 +1,6 @@
 import torch
-from sklearn.decomposition import FastICA, PCA
-from sklearn.cluster import KMeans, MiniBatchKMeans
+from sklearn.decomposition import *
+from sklearn.cluster import KMeans, MiniBatchKMeans, OPTICS
 from sklearn.metrics import silhouette_score
 from tqdm import tqdm
 
@@ -76,8 +76,10 @@ class ActivationClustering():
         nb_clusters: int = 2,
         nb_dims: int = 10,
         reduce_method: str = 'FastICA',
+        clustering_method: str = 'KMeans',
         cluster_analysis: str = 'silhouette_score',
-        **kwargs):
+        silhouette_threshold: float = 0.12,
+    ):
         """
         @param nb_clusters: number of clusters (default: 2)
         @param nb_dims: the reduced dimension of feature maps (default: 10)
@@ -94,29 +96,51 @@ class ActivationClustering():
         self.feature_extractor = feature_extractor
         self.classifier = classifier
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.silhouette_threshold = silhouette_threshold
 
         match self.reduce_method:
             case 'FastICA':
-                self.projector = FastICA(n_components=self.nb_dims, whiten='unit-variance', max_iter=1000)
+                self.projector = FastICA(n_components=self.nb_dims, whiten='unit-variance', max_iter=2000)
             case 'PCA':
                 self.projector = PCA(n_components=self.nb_dims)
+            case 'FA':
+                self.projector = FactorAnalysis(n_components=self.nb_dims)
+            case 'IncrementalPCA':
+                self.projector = IncrementalPCA(n_components=self.nb_dims)
+            case 'KernelPCA':
+                self.projector = KernelPCA(n_components=self.nb_dims)
+            case 'LatentDirichletAllocation':
+                self.projector = LatentDirichletAllocation(n_components=self.nb_dims)
+            case 'MiniBatchSparsePCA':
+                self.projector = MiniBatchSparsePCA(n_components=self.nb_dims)
+            case 'NMF':
+                self.projector = NMF(n_components=self.nb_dims)
+            case 'MiniBatchNMF':
+                self.projector = MiniBatchNMF(n_components=self.nb_dims)
+            case 'SparsePCA':
+                self.projector = SparsePCA(n_components=self.nb_dims)
+            case 'TruncatedSVD':
+                self.projector = TruncatedSVD(n_components=self.nb_dims)
             case _:
                 raise ValueError(self.reduce_method + ' dimensionality reduction method not supported.')
-        clusterer_class = KMeans
-        self.clusterer = clusterer_class(n_clusters=self.nb_clusters, n_init="auto")
+        match clustering_method:
+            case 'KMeans':
+                self.clusterer = KMeans(n_clusters=self.nb_clusters, n_init="auto")
+            case 'OPTICS':
+                self.clusterer = OPTICS(n_jobs=1)
 
     def get_pred_labels(self) -> torch.Tensor:
         all_fm = []
         all_pred_label = []
         loader = self.dataloader
         labels = set()
-        for _input, _label in tqdm(loader, leave=False):
+        # for _input, _label in tqdm(loader, leave=False):
+        for _input, _label in loader:
             labels.update([l.item() for l in _label])
             fm = self.feature_extractor(_input.to(self.device))
 
             pred_label = self.classifier(fm)
             assert len(pred_label.shape) == 1, 'classifier should return 1d tensor'
-
 
             # we use flatten because feature extractor can return non 1d feature maps
             all_fm.append(torch.flatten(fm.detach().cpu(), 1, -1))
@@ -131,7 +155,8 @@ class ActivationClustering():
         idx_list: list[torch.Tensor] = []
         reduced_fm_centers_list: list[torch.Tensor] = []
         kwargs_list: list[dict[str, torch.Tensor]] = []
-        for _class in tqdm(labels, leave=False):
+        # for _class in tqdm(labels, leave=False):
+        for _class in labels:
             idx = all_pred_label == _class
             fm = all_fm[idx]
             reduced_fm = torch.as_tensor(self.projector.fit_transform(fm.numpy()))
@@ -143,12 +168,13 @@ class ActivationClustering():
         if self.cluster_analysis == 'distance':
             reduced_fm_centers = torch.stack(reduced_fm_centers_list)
 
-        for _class in tqdm(labels, leave=False):
+        # for _class in tqdm(labels, leave=False):
+        for _class in labels:
             kwargs = kwargs_list[_class]
             idx = torch.arange(len(all_pred_label))[idx_list[_class]]
             if self.cluster_analysis == 'distance':
                 kwargs['reduced_fm_centers'] = reduced_fm_centers
-            poison_cluster_classes = analyze_func(_class=_class, idx=idx, **kwargs)
+            poison_cluster_classes = analyze_func(_class=_class, idx=idx, silhouette_threshold=self.silhouette_threshold, **kwargs)
             for poison_cluster_class in poison_cluster_classes:
                 result[idx[kwargs['cluster_class'] == poison_cluster_class]] = True
         return result
@@ -183,7 +209,7 @@ class ActivationClustering():
 
     def analyze_by_silhouette_score(self, cluster_class: torch.Tensor,
                                     reduced_fm: torch.Tensor,
-                                    silhouette_threshold: float = 0.11,
+                                    silhouette_threshold: float,
                                     **kwargs) -> list[int]:
         """Return :meth:`analyze_by_relative_size()`
         if :any:`sklearn.metrics.silhouette_score` is high,

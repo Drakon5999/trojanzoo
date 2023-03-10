@@ -9,6 +9,37 @@ from collections.abc import Callable
 if TYPE_CHECKING:
     import torch.utils.data
 
+import sklearn.decomposition._fastica as fastica
+import numpy as np
+from tenacity import retry, stop_after_attempt, wait_none
+
+def _retryable_ica_par(X, tol, g, fun_args, max_iter, w_init):
+    """Parallel FastICA.
+    Used internally by FastICA --main loop
+    """
+    W = fastica._sym_decorrelation(w_init)
+    del w_init
+    p_ = float(X.shape[1])
+    for ii in range(max_iter):
+        gwtx, g_wtx = g(np.dot(W, X), fun_args)
+        W1 = fastica._sym_decorrelation(np.dot(gwtx, X.T) / p_ - g_wtx[:, np.newaxis] * W)
+        del gwtx, g_wtx
+        # builtin max, abs are faster than numpy counter parts.
+        # np.einsum allows having the lowest memory footprint.
+        # It is faster than np.diag(np.dot(W1, W.T)).
+        lim = max(abs(abs(np.einsum("ij,ij->i", W1, W)) - 1))
+        W = W1
+        if lim < tol:
+            break
+    else:
+        raise ValueError("FastICA did not converge. Consider increasing "
+                            "tolerance or the maximum number of iterations.")
+
+    return W, ii + 1
+
+# override _ica_par to use retry
+fastica._ica_par = _retryable_ica_par
+
 
 class ActivationClustering():
     r"""Activation Clustering proposed by Bryant Chen
@@ -98,9 +129,11 @@ class ActivationClustering():
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.silhouette_threshold = silhouette_threshold
 
+        self.projector_reserved = PCA(n_components=self.nb_dims)
+
         match self.reduce_method:
             case 'FastICA':
-                self.projector = FastICA(n_components=self.nb_dims, whiten='unit-variance', max_iter=2000)
+                self.projector = fastica.FastICA(n_components=self.nb_dims, whiten='unit-variance', max_iter=2000, tol=1e-5)
             case 'PCA':
                 self.projector = PCA(n_components=self.nb_dims)
             case 'FA':
@@ -129,6 +162,10 @@ class ActivationClustering():
             case 'OPTICS':
                 self.clusterer = OPTICS(n_jobs=1)
 
+    @retry(stop=stop_after_attempt(5), wait=wait_none())
+    def _get_projector_value(self, fm: torch.Tensor):
+        return torch.as_tensor(self.projector.fit_transform(fm.numpy()))
+
     def get_pred_labels(self) -> torch.Tensor:
         all_fm = []
         all_pred_label = []
@@ -155,12 +192,19 @@ class ActivationClustering():
         idx_list: list[torch.Tensor] = []
         reduced_fm_centers_list: list[torch.Tensor] = []
         kwargs_list: list[dict[str, torch.Tensor]] = []
-        # for _class in tqdm(labels, leave=False):
-        for _class in labels:
+        all_clusters = {}
+        for _class in tqdm(labels, leave=False):
+        # for _class in labels:
             idx = all_pred_label == _class
             fm = all_fm[idx]
-            reduced_fm = torch.as_tensor(self.projector.fit_transform(fm.numpy()))
+            try:
+                reduced_fm = self._get_projector_value(fm)
+            except Exception:
+                # if we can't reduce the dimension, we just user PCA projector
+                reduced_fm = torch.as_tensor(self.projector_reserved.fit_transform(fm.numpy()))
+
             cluster_class = torch.as_tensor(self.clusterer.fit_predict(reduced_fm))
+            all_clusters[_class] = cluster_class.clone().detach()
             kwargs_list.append(dict(cluster_class=cluster_class, reduced_fm=reduced_fm))
             idx_list.append(idx)
             if self.cluster_analysis == 'distance':
@@ -168,6 +212,7 @@ class ActivationClustering():
         if self.cluster_analysis == 'distance':
             reduced_fm_centers = torch.stack(reduced_fm_centers_list)
 
+        all_poison_clusters = {}
         # for _class in tqdm(labels, leave=False):
         for _class in labels:
             kwargs = kwargs_list[_class]
@@ -177,6 +222,14 @@ class ActivationClustering():
             poison_cluster_classes = analyze_func(_class=_class, idx=idx, silhouette_threshold=self.silhouette_threshold, **kwargs)
             for poison_cluster_class in poison_cluster_classes:
                 result[idx[kwargs['cluster_class'] == poison_cluster_class]] = True
+
+            all_poison_clusters[_class] = poison_cluster_classes
+
+
+        self.all_pred_label = all_pred_label
+        self.all_fm = all_fm
+        self.all_clusters = all_clusters
+        self.all_poison_clusters = all_poison_clusters
         return result
 
     def analyze_by_size(self, cluster_class: torch.Tensor, **kwargs) -> list[int]:

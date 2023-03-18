@@ -218,11 +218,12 @@ class NeuralCleanse():
         for _ in iterator:
             batch_logger.reset()
             for _input, _label in tqdm(self.dataset, leave=False):
-                atanh_pattern = atanh_pattern_root*255.
                 optimizer.zero_grad()
+
+                atanh_pattern = atanh_pattern_root*255.
                 _input = _input.detach().to(self.device)
                 pattern = tanh_func(atanh_pattern)    # (c+1, h, w)
-                mask = tanh_func(atanh_mask)    # (c+1, h, w)
+                mask = tanh_func(atanh_mask)   # (c+1, h, w)
                 trigger_input = self.patch_images(_input, mask, pattern).cuda()
                 trigger_label = (label * torch.ones_like(_label)).cuda()
                 trigger_output = self.model(trigger_input)
@@ -234,7 +235,6 @@ class NeuralCleanse():
                 batch_norm: torch.Tensor = (mask * pattern)[-1].norm(p=1)
                 batch_loss = batch_entropy + self.cost * batch_norm
 
-                optimizer.zero_grad()
                 batch_loss.backward()
                 optimizer.step()
 

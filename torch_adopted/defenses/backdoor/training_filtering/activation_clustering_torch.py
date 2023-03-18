@@ -193,6 +193,7 @@ class ActivationClustering():
         reduced_fm_centers_list: list[torch.Tensor] = []
         kwargs_list: list[dict[str, torch.Tensor]] = []
         all_clusters = {}
+        all_clusters_flatten = torch.empty(all_pred_label.shape, dtype=torch.int)
         for _class in tqdm(labels, leave=False):
         # for _class in labels:
             idx = all_pred_label == _class
@@ -204,6 +205,7 @@ class ActivationClustering():
                 reduced_fm = torch.as_tensor(self.projector_reserved.fit_transform(fm.numpy()))
 
             cluster_class = torch.as_tensor(self.clusterer.fit_predict(reduced_fm))
+            all_clusters_flatten[idx] = cluster_class.clone().detach()
             all_clusters[_class] = cluster_class.clone().detach()
             kwargs_list.append(dict(cluster_class=cluster_class, reduced_fm=reduced_fm))
             idx_list.append(idx)
@@ -225,7 +227,7 @@ class ActivationClustering():
 
             all_poison_clusters[_class] = poison_cluster_classes
 
-
+        self.all_clusters_flatten = all_clusters_flatten
         self.all_pred_label = all_pred_label
         self.all_fm = all_fm
         self.all_clusters = all_clusters

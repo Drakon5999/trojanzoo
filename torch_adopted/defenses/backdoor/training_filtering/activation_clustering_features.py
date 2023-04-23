@@ -166,7 +166,7 @@ class ActivationClustering():
     def _get_projector_value(self, fm: torch.Tensor):
         return torch.as_tensor(self.projector.fit_transform(fm.numpy()))
 
-    def get_pred_labels(self) -> torch.Tensor:
+    def calculate_features(self) -> torch.Tensor:
         all_fm = []
         all_pred_label = []
         loader = self.dataloader
@@ -179,9 +179,9 @@ class ActivationClustering():
             labels.update([l.item() for l in _label])
             # this is model features
             fm = self.feature_extractor(_input.to(self.device))
-            pred_probs = torch.functional.softmax(self.classifier(fm), dim=1)
-            assert len(pred_label.shape) > 1, 'classifier should return value for each class'
+            pred_probs = torch.nn.functional.softmax(self.classifier(fm), dim=1)
             pred_label = torch.argmax(pred_probs, dim=1)
+            assert len(pred_label) > 1, 'classifier should return value for each class'
 
             classifier_ensurance.append(pred_probs.detach().cpu())
             # we use flatten because feature extractor can return non 1d feature maps
@@ -207,8 +207,8 @@ class ActivationClustering():
         all_sample_activation_norm = np.empty(all_pred_label.shape)
         all_sample_min_distance_to_other_classes = np.empty(all_pred_label.shape)
         all_reduced_fm = torch.empty(all_pred_label.shape[0], self.nb_dims)
-        for _class in tqdm(labels, leave=False):
-        # for _class in labels:
+        # for _class in tqdm(labels, leave=False):
+        for _class in labels:
             idx = all_pred_label == _class
             fm = all_fm[idx]
             try:
@@ -222,33 +222,24 @@ class ActivationClustering():
             all_clusters[_class] = cluster_class.clone().detach()
             kwargs_list.append(dict(cluster_class=cluster_class, reduced_fm=reduced_fm))
             idx_list.append(idx)
-            cluster_centroids = torch.stack([
-                reduced_fm[cluster_class == i].mean(dim=0) for i in range(self.nb_clusters)
-            ])
-            reduced_fm_centers_list.append(reduced_fm.median(dim=0))
+
+            reduced_fm_centers_list.append(torch.median(reduced_fm, dim=0).values)
             all_sample_silhuette[idx] = silhouette_score(reduced_fm, cluster_class)
 
-            all_sample_distance_to_cluster_centroid[idx] = np.stack([
-                torch.norm(reduced_fm[cluster_class == i] - cluster_centroids[i], p=2, dim=1).numpy()
-                for i in range(self.nb_clusters)
-            ])
+
             # TODO: should we norm all_sample_distance_to_cluster_centroid and other features?
 
             # mean distance from each sample to its cluster centroid
-            all_sample_mean_distance_to_cluster_centroid_amoung_cluster[idx] = np.array([
-                all_sample_distance_to_cluster_centroid[idx][cluster_class == i].mean()
-                for i in range(self.nb_clusters)
-            ])
+            for i in range(self.nb_clusters):
+                class_cluster_idx = cluster_class == i
+                cluster_centroid = reduced_fm[class_cluster_idx].mean(dim=0)
+                all_sample_distance_to_cluster_centroid[idx][class_cluster_idx] = torch.norm(reduced_fm[class_cluster_idx] - cluster_centroid.unsqueeze(0), p=2, dim=1).numpy()
 
-            all_sample_relative_cluster_size[idx] = np.array([
-                (cluster_class == i).sum() / len(cluster_class)
-                for i in range(self.nb_clusters)
-            ])
+                all_sample_mean_distance_to_cluster_centroid_amoung_cluster[idx][class_cluster_idx] = all_sample_distance_to_cluster_centroid[idx][class_cluster_idx].mean()
 
-            all_sample_activation_norm[idx] = np.array([
-                torch.norm(fm[i], 2).item()
-                for i in range(len(cluster_class))
-            ])
+                all_sample_relative_cluster_size[idx][class_cluster_idx] = (class_cluster_idx).sum() / len(cluster_class)
+
+                all_sample_activation_norm[idx][class_cluster_idx] = torch.norm(fm[i], 2).item()
 
         reduced_fm_centers = torch.stack(reduced_fm_centers_list)
 
@@ -256,12 +247,21 @@ class ActivationClustering():
         # for _class in tqdm(labels, leave=False):
         for _class in labels:
             # calculate minimum amoung distances for each sample to other classes
-            no_this_class_center_mask = torch.ones_like(reduced_fm_centers)
+            no_this_class_center_mask = torch.ones((reduced_fm_centers.shape[0],), dtype=torch.bool)
             no_this_class_center_mask[_class] = 0
-            all_sample_min_distance_to_other_classes[idx_list[_class]] = np.min(
-                torch.norm(all_reduced_fm[idx_list[_class]] - reduced_fm_centers[no_this_class_center_mask], p=2, dim=1).numpy(),
-                axis=1
-            )
+            min_norm = np.empty((idx_list[_class].sum(),))
+            min_norm[:] = np.inf
+            for other_class_center in reduced_fm_centers[no_this_class_center_mask, : ]:
+                assert other_class_center.shape == (self.nb_dims,), 'other_class_center should be 1d'
+                min_norm = np.minimum(
+                    min_norm,
+                    torch.norm(
+                        all_reduced_fm[idx_list[_class]] - other_class_center.unsqueeze(0),
+                        p=2, dim=1
+                    ).numpy()
+                )
+
+            all_sample_min_distance_to_other_classes[idx_list[_class]] = min_norm
 
             # kwargs = kwargs_list[_class]
             # idx = torch.arange(len(all_pred_label))[idx_list[_class]]
@@ -292,7 +292,7 @@ class ActivationClustering():
             'all_sample_activation_norm': all_sample_activation_norm,
             'all_sample_min_distance_to_other_classes': all_sample_min_distance_to_other_classes,
         }
-        return result
+        return self.all_ac_features
 
     def analyze_by_size(self, cluster_class: torch.Tensor, **kwargs) -> list[int]:
         r"""The smallest cluster.

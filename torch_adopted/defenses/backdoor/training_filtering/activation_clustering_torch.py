@@ -99,7 +99,7 @@ class ActivationClustering():
 
     name: str = 'activation_clustering'
 
-    def __init__(
+    def __init__(   
         self,
         classifier: Callable[[torch.Tensor], int],
         feature_extractor: Callable[[torch.Tensor], torch.Tensor],
@@ -210,7 +210,7 @@ class ActivationClustering():
             kwargs_list.append(dict(cluster_class=cluster_class, reduced_fm=reduced_fm))
             idx_list.append(idx)
             if self.cluster_analysis == 'distance':
-                reduced_fm_centers_list.append(reduced_fm.median(dim=0))
+                reduced_fm_centers_list.append(reduced_fm.median(dim=0).values)
         if self.cluster_analysis == 'distance':
             reduced_fm_centers = torch.stack(reduced_fm_centers_list)
 
@@ -307,7 +307,7 @@ class ActivationClustering():
         """
         cluster_centers_list = []
         for _class in range(self.nb_clusters):
-            cluster_centers_list.append(reduced_fm[cluster_class == _class].median(dim=0))
+            cluster_centers_list.append(reduced_fm[cluster_class == _class].median(dim=0).values)
         cluster_centers = torch.stack(cluster_centers_list)  # (self.nb_clusters, self.nb_dims)
         # (self.nb_clusters, C, self.nb_dims)
         differences = cluster_centers.unsqueeze(1) - reduced_fm_centers.unsqueeze(0)

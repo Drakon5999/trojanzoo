@@ -109,7 +109,6 @@ class ActivationClustering():
         reduce_method: str = 'FastICA',
         clustering_method: str = 'KMeans',
         cluster_analysis: str = 'silhouette_score',
-        silhouette_threshold: float = 0.12,
     ):
         """
         @param nb_clusters: number of clusters (default: 2)
@@ -118,7 +117,6 @@ class ActivationClustering():
         @param cluster_analysis: the method chosen to detect poisoned cluster classes
                 ['size', 'relative_size', 'distance', 'silhouette_score']
         """
-        # super().__init__(**kwargs)
         self.nb_clusters = nb_clusters
         self.nb_dims = nb_dims
         self.reduce_method = reduce_method
@@ -127,7 +125,6 @@ class ActivationClustering():
         self.feature_extractor = feature_extractor
         self.classifier = classifier
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.silhouette_threshold = silhouette_threshold
 
         self.projector_reserved = PCA(n_components=self.nb_dims)
 
@@ -193,8 +190,6 @@ class ActivationClustering():
         all_pred_label = torch.cat(all_pred_label)
         assert all_pred_label.shape == (len(all_fm),), 'all_pred_label and all_fm should have same length'
 
-        result = torch.zeros_like(all_pred_label, dtype=torch.bool)
-
         idx_list: list[torch.Tensor] = []
         reduced_fm_centers_list: list[torch.Tensor] = []
         kwargs_list: list[dict[str, torch.Tensor]] = []
@@ -225,8 +220,6 @@ class ActivationClustering():
 
             reduced_fm_centers_list.append(torch.median(reduced_fm, dim=0).values)
             all_sample_silhuette[idx] = silhouette_score(reduced_fm, cluster_class)
-
-
             # TODO: should we norm all_sample_distance_to_cluster_centroid and other features?
 
             # mean distance from each sample to its cluster centroid
@@ -243,7 +236,6 @@ class ActivationClustering():
 
         reduced_fm_centers = torch.stack(reduced_fm_centers_list)
 
-        all_poison_clusters = {}
         # for _class in tqdm(labels, leave=False):
         for _class in labels:
             # calculate minimum amoung distances for each sample to other classes
@@ -263,20 +255,8 @@ class ActivationClustering():
 
             all_sample_min_distance_to_other_classes[idx_list[_class]] = min_norm
 
-            # kwargs = kwargs_list[_class]
-            # idx = torch.arange(len(all_pred_label))[idx_list[_class]]
-            # kwargs['reduced_fm_centers'] = reduced_fm_centers
-
-            # poison_cluster_classes = analyze_func(_class=_class, idx=idx, silhouette_threshold=self.silhouette_threshold, **kwargs)
-            # for poison_cluster_class in poison_cluster_classes:
-            #     result[idx[kwargs['cluster_class'] == poison_cluster_class]] = True
-
-            # all_poison_clusters[_class] = poison_cluster_classes
 
         self.all_clusters = all_clusters
-        # self.all_poison_clusters = all_poison_clusters
-
-        # all activation clustering features for each sample
         self.all_ac_features = {
             'classifier_ensurance': classifier_ensurance,
             'all_fm': all_fm,
@@ -322,30 +302,6 @@ class ActivationClustering():
         relative_size = cluster_class.bincount(minlength=self.nb_clusters) / len(cluster_class)
         return torch.arange(self.nb_clusters)[relative_size < size_threshold].tolist()
 
-    def analyze_by_silhouette_score(self, cluster_class: torch.Tensor,
-                                    reduced_fm: torch.Tensor,
-                                    silhouette_threshold: float,
-                                    **kwargs) -> list[int]:
-        """Return :meth:`analyze_by_relative_size()`
-        if :any:`sklearn.metrics.silhouette_score` is high,
-        which means clustering fits data well.
-
-        Args:
-            cluster_class (torch.Tensor): Clustering result tensor
-                with shape ``(N)``.
-            reduced_fm (torch.Tensor): Dim-reduced feature map tensor
-                with shape ``(N, self.nb_dims)``
-            silhouette_threshold (float): The threshold to calculate
-                :any:`sklearn.metrics.silhouette_score`.
-                Defaults to ``0.1``.
-
-        Returns:
-            list[int]: Predicted poison cluster classes list with shape ``(K)``
-
-        """
-        if silhouette_score(reduced_fm, cluster_class) > silhouette_threshold:
-            return self.analyze_by_relative_size(cluster_class, **kwargs)
-        return []
 
     def analyze_by_distance(self, cluster_class: torch.Tensor,
                             reduced_fm: torch.Tensor,

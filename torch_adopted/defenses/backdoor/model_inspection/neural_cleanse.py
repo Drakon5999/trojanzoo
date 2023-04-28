@@ -58,12 +58,15 @@ class NeuralCleanse():
     """
     name: str = 'neural_cleanse'
 
-    def __init__(self,
-                 model: Callable, classes: list[tp.Union[str, int]],
-                 dataset: torch.utils.data.DataLoader, img_shape,
-                 cost=1e-3, nc_cost_multiplier: float = 1.5, nc_patience: float = 10.0,
-                 nc_asr_threshold: float = 0.99,
-                 nc_early_stop_threshold: float = 0.99, device='cuda', **kwargs):
+    def __init__(
+            self,
+            model: Callable, classes: list[tp.Union[str, int]],
+            dataset: torch.utils.data.DataLoader, img_shape,
+            cost=1e-3, nc_cost_multiplier: float = 1.5, nc_patience: float = 10.0,
+            nc_asr_threshold: float = 0.99,
+            nc_early_stop_threshold: float = 0.99, device='cuda', defense_remask_epoch=10,
+            initial_pattern = None,
+            **kwargs):
         self.model = model.cuda()
         self.model.eval()
         self.classes = classes
@@ -75,7 +78,7 @@ class NeuralCleanse():
         self.nc_early_stop_threshold = nc_early_stop_threshold
         self.nc_patience = nc_patience
         self.early_stop_patience = self.nc_patience * 2
-        self.defense_remask_epoch = 10
+        self.defense_remask_epoch = defense_remask_epoch
         self.defense_remask_lr = 0.1
         self.alpha = 1.
         self.device = device
@@ -83,6 +86,7 @@ class NeuralCleanse():
         self.pattern = torch.rand(img_shape, device=self.device) * 255.0
         self.mask = torch.rand(img_shape, device=self.device)
         self.cost = self.init_cost
+        self.initial_pattern = initial_pattern
 
     def patch_images(self, images, mask, pattern):
         """
@@ -192,9 +196,17 @@ class NeuralCleanse():
         self.early_stop_counter = 0
         self.early_stop_norm_best = float('inf')
 
-        atanh_pattern_root = torch.randn(self.pattern.size(), requires_grad=True, device=self.device)
         atanh_mask = torch.randn(self.mask.size(), requires_grad=True, device=self.device)
-        optimizer = optim.Adam([atanh_pattern_root, atanh_mask], lr=self.defense_remask_lr, betas=(0.5, 0.9))
+
+        if self.initial_pattern is not None:
+            atanh_pattern_root = torch.atanh(self.initial_pattern).detach().clone()
+            atanh_pattern_root = atanh_pattern_root.cuda()
+            atanh_pattern_root.requires_grad = True
+            optimizer = optim.Adam([atanh_mask], lr=self.defense_remask_lr, betas=(0.5, 0.9))
+        else:
+            atanh_pattern_root = torch.randn(self.pattern.size(), requires_grad=True, device=self.device)
+            optimizer = optim.Adam([atanh_pattern_root, atanh_mask], lr=self.defense_remask_lr, betas=(0.5, 0.9))
+
         lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer,
                                                             T_max=self.defense_remask_epoch)
 
